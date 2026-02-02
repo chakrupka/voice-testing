@@ -12,28 +12,11 @@ export default function App() {
     id: string;
     role: "user" | "assistant";
     text: string;
-    done: boolean;
   };
 
   const [lines, setLines] = useState<Line[]>([]);
-  const activeAssistantIdRef = useRef<string | null>(null);
-
-  function upsertLine(
-    id: string,
-    role: Line["role"],
-    updater: (cur: Line) => Line,
-  ) {
-    setLines((prev) => {
-      const idx = prev.findIndex((l) => l.id === id);
-      if (idx === -1) {
-        const fresh: Line = { id, role, text: "", done: false };
-        return [...prev, updater(fresh)];
-      }
-      const next = prev.slice();
-      next[idx] = updater(next[idx]);
-      return next;
-    });
-  }
+  const [summary, setSummary] = useState<string>("");
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
 
   async function connect() {
     try {
@@ -59,56 +42,34 @@ export default function App() {
       });
 
       session.on("transport_event", (ev) => {
+        console.log(ev);
         switch (ev.type) {
-          case "response.created": {
-            const rid = ev.response?.id ?? ev.response_id;
-            if (!rid) return;
-            const id = `a:${rid}`;
-            activeAssistantIdRef.current = id;
-            upsertLine(id, "assistant", (cur) => cur);
-            break;
-          }
-
-          case "response.output_audio_transcript.delta": {
-            const id =
-              activeAssistantIdRef.current ??
-              `a:${ev.response_id ?? "unknown"}`;
-            const delta = ev.delta ?? "";
-            if (!delta) return;
-            upsertLine(id, "assistant", (cur) => ({
-              ...cur,
-              text: cur.text + delta,
-            }));
-            break;
-          }
-
-          case "response.output_audio_transcript.done": {
-            const id =
-              activeAssistantIdRef.current ??
-              `a:${ev.response_id ?? "unknown"}`;
-            upsertLine(id, "assistant", (cur) => ({ ...cur, done: true }));
-            break;
-          }
-
-          case "conversation.item.input_audio_transcription.delta": {
-            const id = `u:${ev.item_id}`;
-            const delta = ev.delta ?? "";
-            if (!delta) return;
-            upsertLine(id, "user", (cur) => ({
-              ...cur,
-              text: cur.text + delta,
-            }));
-            break;
-          }
-
           case "conversation.item.input_audio_transcription.completed": {
-            const id = `u:${ev.item_id}`;
-            upsertLine(id, "user", (cur) => ({
-              ...cur,
-              text: ev.transcript ?? cur.text,
-              done: true,
-            }));
+            const text = ev.transcript;
+            const role = "user";
+            const id = ev.item_id;
+            console.log("Adding to lines (assistant):", { id, role, text });
+            setLines((prevLines) => {
+              if (prevLines.some((line) => line.id === id)) return prevLines;
+              return [...prevLines, { id, role, text }];
+            });
             break;
+          }
+
+          case "conversation.item.done": {
+            const content = ev.item.content;
+            if (content && content.length) {
+              if (content[0].transcript) {
+                const text = content[0].transcript;
+                const role = ev.item.role;
+                const id = ev.item.id;
+                setLines((prevLines) => {
+                  if (prevLines.some((line) => line.id === id))
+                    return prevLines;
+                  return [...prevLines, { id, role, text }];
+                });
+              }
+            }
           }
         }
       });
@@ -129,6 +90,38 @@ export default function App() {
       sessionRef.current = null;
       setStatus("idle");
     }
+
+    // Generate summary if there's conversation history
+    if (lines.length > 0) {
+      setIsGeneratingSummary(true);
+      try {
+        const transcript = lines
+          .map((line) => `${line.role}: ${line.text}`)
+          .join("\n");
+
+        const response = await fetch("/api/summarize", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ transcript }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          setSummary(data.summary);
+        } else {
+          const errorText = await response.text();
+          console.error("Failed to generate summary:", errorText);
+          setSummary("Failed to generate summary.");
+        }
+      } catch (error) {
+        console.error("Error generating summary:", error);
+        setSummary("Failed to generate summary.");
+      } finally {
+        setIsGeneratingSummary(false);
+      }
+    }
   }
 
   return (
@@ -148,6 +141,27 @@ export default function App() {
         After connecting and granting mic permission, speak normally; the
         session should respond with audio.
       </p>
+
+      {isGeneratingSummary && (
+        <div style={{ padding: 10, background: "#f0f0f0", marginTop: 10 }}>
+          Generating summary...
+        </div>
+      )}
+
+      {summary && (
+        <div
+          style={{
+            padding: 10,
+            background: "#e8f5e9",
+            marginTop: 10,
+            borderRadius: 4,
+          }}
+        >
+          <h3 style={{ margin: "0 0 10px 0" }}>Conversation Summary</h3>
+          <div style={{ whiteSpace: "pre-wrap" }}>{summary}</div>
+        </div>
+      )}
+
       <div style={{ whiteSpace: "pre-wrap", fontFamily: "system-ui" }}>
         {lines.map((l) => (
           <div key={l.id}>
